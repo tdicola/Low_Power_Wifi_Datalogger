@@ -20,10 +20,6 @@
 
 #include <Adafruit_CC3000.h>
 #include <SPI.h>
-#include <avr/sleep.h>
-#include <avr/power.h>
-#include <avr/wdt.h>
-#include <avr/interrupt.h>
 
 // CC3000 configuration.
 #define ADAFRUIT_CC3000_IRQ    3
@@ -49,6 +45,7 @@
 // Internal state used by the sketch.
 Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT);
 uint32_t ip;
+unsigned long lastSend = 0;
 
 // Take a sensor reading and send it to the server.
 void logSensorReading() {
@@ -64,6 +61,10 @@ void logSensorReading() {
   else {
     Serial.println(F("Error sending measurement!"));
   }
+
+  // Wait a small period of time before closing the connection
+  // so the message is sent to the server.
+  delay(100);
   
   // Close the connection to the server.
   server.close();
@@ -103,7 +104,10 @@ void setup(void)
 
 void loop(void)
 {
-  logSensorReading();
-  delay(1000*LOGGING_FREQ_SECONDS);
+  unsigned long time = millis();
+  if (time - lastSend >= (1000 * (unsigned long)LOGGING_FREQ_SECONDS)) {
+    logSensorReading();
+    lastSend = time;
+  }
 }
 

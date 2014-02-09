@@ -55,6 +55,9 @@
                                         // shutdown pin.  This shutdown pin is assumed to be active low, i.e. the 
                                         // regulator is turned off when the pin is set to a low value.
 
+#define SENSOR_POWER_PIN       9        // The Arduino digital pin which will be driven high (5V) to provide
+                                        // power temporarily for taking a sensor measurement.
+
 // Internal state used by the sketch.
 Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT);
 int sleepIterations = 0;
@@ -66,10 +69,7 @@ ISR(WDT_vect)
 {
   // Set the watchdog activated flag.
   // Note that you shouldn't do much work inside an interrupt handler.
-  if(!watchdogActivated)
-  {
-    watchdogActivated = true;
-  }
+  watchdogActivated = true;
 }
 
 // Put the Arduino to sleep.
@@ -78,6 +78,9 @@ void sleep()
   // Set sleep to full power down.  Only external interrupts or 
   // the watchdog timer can wake the CPU!
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+  // Disable the ADC while asleep.
+  power_adc_disable();
 
   // Enable sleep.
   sleep_enable();
@@ -98,12 +101,9 @@ void sleep()
   power_all_enable();
 }
 
-// Take a sensor reading and send it to the server.
-void logSensorReading() {
-  // Take a sensor reading
-  int reading = analogRead(SENSOR_PIN);
-  
-  // Turn on the CC3000 and reconnect to the wifi network.
+// Enable the CC3000 and connect to the wifi network.
+// Return true if enabled and connected, false otherwise.
+boolean enableWiFi() {
   Serial.println(F("Turning on CC3000."));
   
   // Turn on the 3.3V regulator and wait a small period for the voltage
@@ -117,40 +117,37 @@ void logSensorReading() {
   // Connect to the AP.
   if (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY)) {
     Serial.println(F("Failed!"));
-    while(1);
+    return false;
   }
   Serial.println(F("Connected!"));
   
   // Wait for DHCP to be complete.
   Serial.println(F("Request DHCP"));
+  int attempts = 0;
   while (!cc3000.checkDHCP())
   {
+    if (attempts > 5) {
+      Serial.println(F("DHCP didn't finish!"));
+      return false;
+    }
+    attempts += 1;
     delay(100);
   }
   
-  // Connect to the server and send the reading.
-  Serial.print(F("Sending measurement: ")); Serial.println(reading, DEC);
-  Adafruit_CC3000_Client server = cc3000.connectTCP(ip, SERVER_PORT);
-  if (server.connected()) {
-    server.println(reading);
-  }
-  else {
-    Serial.println(F("Error sending measurement!"));
-  }
-  
-  // Note that if you're sending a lot of data you
-  // might need to add a delay here so the CC3000 has
-  // time to finish sending all the data before shutdown.
-  
-  // Close the connection to the server.
-  server.close();
-  
+  // Return success, the CC3000 is enabled and connected to the network.
+  return true;
+}
+
+// Disconnect from wireless network and shut down the CC3000.
+void shutdownWiFi() {
   // Disconnect from the AP.
   // This might not be strictly necessary, but I found
   // it was sometimes difficult to quickly reconnect to
   // my AP if I shut down the CC3000 without first
   // disconnecting from the network.
-  cc3000.disconnect();
+  if (cc3000.checkConnected()) {
+    cc3000.disconnect();
+  }
 
   // Wait for the CC3000 to finish disconnecting before
   // continuing.
@@ -163,8 +160,39 @@ void logSensorReading() {
   
   // Turn off the 3.3V voltage regulator powering the CC3000.
   digitalWrite(REG_SHUTDOWN_PIN, LOW);
+  delay(100);
   
   Serial.println(F("CC3000 shut down.")); 
+}
+
+// Take a sensor reading and send it to the server.
+void logSensorReading() {
+  // Turn on power to the sensor.
+  digitalWrite(SENSOR_POWER_PIN, HIGH);
+  
+  // Take a sensor reading
+  int reading = analogRead(SENSOR_PIN);
+  
+  // Turn off power to the sensor.
+  digitalWrite(SENSOR_POWER_PIN, LOW);
+  
+  // Connect to the server and send the reading.
+  Serial.print(F("Sending measurement: ")); Serial.println(reading, DEC);
+  Adafruit_CC3000_Client server = cc3000.connectTCP(ip, SERVER_PORT);
+  if (server.connected()) {
+    server.println(reading);
+  }
+  else {
+    Serial.println(F("Error sending measurement!"));
+  }
+  
+  // Note that if you're sending a lot of data you
+  // might need to tweak the delay here so the CC3000 has
+  // time to finish sending all the data before shutdown.
+  delay(100);
+  
+  // Close the connection to the server.
+  server.close();
 }
 
 void setup(void)
@@ -174,9 +202,15 @@ void setup(void)
   // Configure digital output connected to 3.3V regulator shutdown.
   pinMode(REG_SHUTDOWN_PIN, OUTPUT);
   
+  // Configure digital output connected to sensor.
+  pinMode(SENSOR_POWER_PIN, OUTPUT);
+  
   // Turn on the 3.3V regulator and wait a short period for it to stabilize.
   digitalWrite(REG_SHUTDOWN_PIN, HIGH);
   delay(100);
+  
+  // Turn off power to the sensor.
+  digitalWrite(SENSOR_POWER_PIN, LOW);
   
   // Initialize the CC3000.
   Serial.println(F("\nInitializing CC3000..."));
@@ -186,12 +220,8 @@ void setup(void)
     while(1);
   }
 
-  // Turn off the CC3000--it will be turned on later to
-  // take sensor readings and send them to the server.
-  wlan_stop(); 
-
-  // Turn off the 3.3V voltage regulator powering the CC3000. 
-  digitalWrite(REG_SHUTDOWN_PIN, LOW);
+  // Disable CC3000 now that it is initialized.
+  shutdownWiFi();
   
   // Store the IP of the server.
   ip = cc3000.IP2U32(SERVER_IP);
@@ -238,10 +268,14 @@ void loop(void)
       // Reset the number of sleep iterations.
       sleepIterations = 0;
       // Log the sensor data (waking the CC3000, etc. as needed)
-      logSensorReading();
-    }
-    // Go to sleep!
-    sleep();
+      if (enableWiFi()) {
+        logSensorReading();
+      }
+      shutdownWiFi();
+    }    
   }
+  
+  // Go to sleep!
+  sleep();
 }
 

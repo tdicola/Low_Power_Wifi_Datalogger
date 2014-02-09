@@ -61,10 +61,7 @@ ISR(WDT_vect)
 {
   // Set the watchdog activated flag.
   // Note that you shouldn't do much work inside an interrupt handler.
-  if(!watchdogActivated)
-  {
-    watchdogActivated = true;
-  }
+  watchdogActivated = true;
 }
 
 // Put the Arduino to sleep.
@@ -73,6 +70,9 @@ void sleep()
   // Set sleep to full power down.  Only external interrupts or 
   // the watchdog timer can wake the CPU!
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+  // Turn off the ADC while asleep.
+  power_adc_disable();
 
   // Enable sleep and enter sleep mode.
   sleep_mode();
@@ -85,28 +85,66 @@ void sleep()
   power_all_enable();
 }
 
-// Take a sensor reading and send it to the server.
-void logSensorReading() {
-  // Take a sensor reading
-  int reading = analogRead(SENSOR_PIN);
-  
-  // Wake the CC3000 from shutdown.
+// Enable the CC3000 and connect to the wifi network.
+// Return true if enabled and connected, false otherwise.
+boolean enableWiFi() {
   Serial.println(F("Turning on CC3000."));
+  
+  // Turn on the CC3000.
   wlan_start(0);
   
   // Connect to the AP.
   if (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY)) {
+    // Couldn't connect for some reason.  Fail and move on so the hardware goes back to sleep and tries again later.
     Serial.println(F("Failed!"));
-    while(1);
+    return false;
   }
   Serial.println(F("Connected!"));
   
-  // Wait for DHCP to be complete.
+  // Wait for DHCP to be complete.  Make a best effort with 5 attempts, then fail and move on.
   Serial.println(F("Request DHCP"));
+  int attempts = 0;
   while (!cc3000.checkDHCP())
   {
+    if (attempts > 5) {
+      Serial.println(F("DHCP didn't finish!"));
+      return false;
+    }
+    attempts += 1;
     delay(100);
   }
+  
+  // Return success, the CC3000 is enabled and connected to the network.
+  return true;
+}
+
+// Disconnect from wireless network and shut down the CC3000.
+void shutdownWiFi() {
+  // Disconnect from the AP if connected.
+  // This might not be strictly necessary, but I found
+  // it was sometimes difficult to quickly reconnect to
+  // my AP if I shut down the CC3000 without first
+  // disconnecting from the network.
+  if (cc3000.checkConnected()) {
+    cc3000.disconnect();
+  }
+
+  // Wait for the CC3000 to finish disconnecting before
+  // continuing.
+  while (cc3000.checkConnected()) {
+    delay(100);
+  }
+  
+  // Shut down the CC3000.
+  wlan_stop();
+  
+  Serial.println(F("CC3000 shut down.")); 
+}
+
+// Take a sensor reading and send it to the server.
+void logSensorReading() {
+  // Take a sensor reading
+  int reading = analogRead(SENSOR_PIN);
   
   // Connect to the server and send the reading.
   Serial.print(F("Sending measurement: ")); Serial.println(reading, DEC);
@@ -119,32 +157,12 @@ void logSensorReading() {
   }
   
   // Note that if you're sending a lot of data you
-  // might need to add a delay here so the CC3000 has
+  // might need to tweak the delay here so the CC3000 has
   // time to finish sending all the data before shutdown.
+  delay(100);
   
   // Close the connection to the server.
   server.close();
-  
-  // Disconnect from the AP.
-  // This might not be strictly necessary, but I found
-  // it was sometimes difficult to quickly reconnect to
-  // my AP if I shut down the CC3000 without first
-  // disconnecting from the network.
-  cc3000.disconnect();
-
-  // Wait for the CC3000 to finish disconnecting before
-  // continuing.
-  while (cc3000.checkConnected()) {
-    delay(100);
-  }
-  
-  // Shut down the CC3000.
-  wlan_stop();
-  
-  digitalWrite(7, LOW);
-  delay(100); 
-  
-  Serial.println(F("CC3000 shut down.")); 
 }
 
 void setup(void)
@@ -208,10 +226,14 @@ void loop(void)
       // Reset the number of sleep iterations.
       sleepIterations = 0;
       // Log the sensor data (waking the CC3000, etc. as needed)
-      logSensorReading();
+      if (enableWiFi()) {
+        logSensorReading();
+      }
+      shutdownWiFi();
     }
-    // Go to sleep!
-    sleep();
   }
+  
+  // Go to sleep!
+  sleep();
 }
 
